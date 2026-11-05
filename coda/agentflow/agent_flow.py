@@ -85,6 +85,7 @@ class AgentFlow:
         self.r3_enabled = self.config.trainer.use_rollout_routing_replay
         router_cfg = self.config.agentflow.router
         self.r3_decode_workers = int(router_cfg.get("r3_decode_workers", 0))
+        self.r3_reuse_parent_prefix = bool(router_cfg.get("r3_reuse_parent_prefix", False))
         self.max_response_len_per_trajectory = int(self.config.data_sources[0].max_response_len_per_trajectory)
         self.partial_rollout_enabled = self.config.rollout.partial
         self.mask_offpolicy_in_partial_rollout = self.config.rollout.mask_offpolicy_in_partial_rollout

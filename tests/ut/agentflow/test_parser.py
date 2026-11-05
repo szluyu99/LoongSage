@@ -601,6 +601,31 @@ def test_append_routed_experts_grows_buffer_in_place() -> None:
     assert merged[:, 0].tolist() == [0] * 7 + [1, 1, 2, 2]
 
 
+def test_compact_segment_reuses_parent_r3_prefix() -> None:
+    """A compact segment copies the routing rows of the prefix it shares with its parent."""
+    parser = make_parser()
+    parser.r3_reuse_parent_prefix = True
+    parser.accumulate_reasoning = True
+    trajectory = Trajectory(
+        trajectory_id="traj-reuse",
+        prompt_id="p",
+        tokens=[1, 2, 3, 4, 5],
+        segments=[Segment(token_start=0, token_end=5, segment_id=0, origin="compact")],
+        rollout_routed_experts=torch.arange(10, dtype=torch.uint8).reshape(5, 2),
+    )
+
+    assert parser._r3_reuse_from_parent(trajectory, 0, [1, 2, 3, 9, 9, 9]) == (3, 0)
+    trajectory.segments[0].origin = "root"
+    assert parser._r3_reuse_from_parent(trajectory, 0, [1, 2, 3, 9]) == (0, 0)
+
+    trajectory.segments[0].origin = "compact"
+    trajectory.tokens.extend([1, 2, 3, 9])
+    chunk = torch.full((1, 2), 99, dtype=torch.uint8)  # rows from start_len=3 (+terminal)
+    parser._append_routed_experts(trajectory, chunk, True, reuse_len=3, reuse_from=0)
+    assert trajectory.rollout_routed_experts[5:8].tolist() == [[0, 1], [2, 3], [4, 5]]
+    assert trajectory.rollout_routed_experts.size(0) == len(trajectory.tokens)
+
+
 def test_build_assistant_message_decodes_weight_version() -> None:
     """Request-level SGLang weight_version should be decoded from meta_info."""
     parser = make_parser(r3_enabled=False)
@@ -1211,6 +1236,43 @@ def test_compact_segment_requests_full_r3_and_aligns_rows() -> None:
     assert experts.size(0) == len(trajectory.tokens) == 14
     assert torch.equal(experts[:7], _R3_PARENT_ROWS)
     assert (experts[7:] == 99).all()
+
+
+def test_compact_segment_reuses_parent_r3_rows_when_enabled() -> None:
+    """With reuse on, SGLang sends rows from reuse_len and the shared prefix is copied."""
+    ctx, trajectory = _run_compact_r3_turn(r3_reuse_parent_prefix=True)
+
+    assert ctx.routed_experts_start_len == ctx.routed_experts_reuse_len == 3
+    assert ctx.routed_experts_reuse_from == 2
+    experts = trajectory.rollout_routed_experts
+    assert experts.size(0) == len(trajectory.tokens) == 14
+    assert torch.equal(experts[:7], _R3_PARENT_ROWS)
+    assert torch.equal(experts[7:10], _R3_PARENT_ROWS[2:5])
+    assert (experts[10:] == 99).all()
+
+
+@pytest.mark.parametrize(
+    ("parent_origin", "accumulate_reasoning", "new_prompt"),
+    [
+        ("root", True, [11, 12, 13, 90]),  # root parent: siblings share its prompt
+        ("compact", False, [11, 12, 13, 90]),  # think pruned: stored tokens != routed context
+        ("compact", True, [90, 12, 13, 14]),  # no shared prefix
+        ("compact", True, [11]),  # must leave at least one row for SGLang
+    ],
+)
+def test_r3_reuse_from_parent_skips_unsafe_cases(parent_origin, accumulate_reasoning, new_prompt) -> None:
+    parser = make_parser()
+    parser.r3_reuse_parent_prefix = True
+    parser.accumulate_reasoning = accumulate_reasoning
+    trajectory = Trajectory(
+        trajectory_id="traj-reuse-skip",
+        prompt_id="p",
+        tokens=[11, 12, 13, 14, 15],
+        segments=[Segment(token_start=0, token_end=5, segment_id=0, origin=parent_origin)],
+        rollout_routed_experts=torch.arange(10, dtype=torch.uint8).reshape(5, 2),
+    )
+
+    assert parser._r3_reuse_from_parent(trajectory, 0, new_prompt) == (0, 0)
 
 
 def test_build_turn_input_matches_reserialized_tool_call_arguments() -> None:
